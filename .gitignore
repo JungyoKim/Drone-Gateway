@@ -1,0 +1,4 @@
+# PlatformIO build output
+.pio/
+# Local secrets (WiFi creds, device token) — never commit
+src/config.h

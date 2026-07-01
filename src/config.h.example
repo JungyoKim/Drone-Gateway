@@ -1,0 +1,31 @@
+// -----------------------------------------------------------------------------
+// tellovoice ESP32-S3 firmware configuration.
+//
+// Copy this file to `config.h` (same directory) and fill in your values, OR
+// pass the same names as -D build flags in platformio.ini. Anything left unset
+// falls back to the placeholder defaults compiled into main.cpp.
+//
+//   cp src/config.h.example src/config.h   # then edit src/config.h
+//
+// config.h is intentionally NOT committed (add it to .gitignore) so secrets
+// stay out of the repo.
+// -----------------------------------------------------------------------------
+#pragma once
+
+// ---- WiFi (phone hotspot) --------------------------------------------------
+// MUST be a 2.4 GHz network. The Tello only speaks 2.4 GHz and its SSID (when
+// you later put it in STA mode) must be alphanumeric. See README.md.
+#define WIFI_SSID   "YOUR_HOTSPOT_SSID"
+#define WIFI_PASS   "YOUR_HOTSPOT_PASSWORD"
+
+// ---- Backend WebSocket (outbound / dial-out) -------------------------------
+// Points at the deployed Dokploy backend. Uses wss on 443 (Let's Encrypt).
+#define WS_HOST     "drone.xenv.cc"   // host only, no scheme/path
+#define WS_PORT     443                // 443 for wss, 8080 for local ws
+#define WS_PATH     "/ws/device"       // fixed by the backend
+#define WS_USE_TLS  1                  // 1 = wss (beginSSL), 0 = plain ws
+
+// ---- Device identity (sent in the hello frame) -----------------------------
+#define DEVICE_ID    "tello-esp32-01"
+#define DEVICE_TOKEN "dev-device-token"          // must match backend DEVICE_TOKEN
+#define FW_VERSION   "esp32s3-tello-relay/1.0.0"
