@@ -4,17 +4,24 @@
 // Pipeline:  phone browser --(wss)--> cloud backend --(wss)--> THIS DEVICE
 //            --(UDP:8889)--> DJI Tello (RoboMaster TT)
 //
+// Network topology (STA+AP dual-mode):
+//   - STA: connects to phone hotspot for internet (backend WebSocket)
+//   - AP ("TelloBridge"): local WiFi that the Tello joins as a station
+//   This avoids phone-hotspot client-isolation issues and gives us a
+//   predictable subnet (192.168.4.x) for Tello discovery.
+//
 // This device DIALS OUT to the backend (it is behind the phone-hotspot NAT and
 // can never accept an inbound connection). It:
-//   1. joins the phone hotspot as a WiFi station,
-//   2. opens an outbound WebSocket to the backend `/ws/device` and authenticates
+//   1. starts a soft AP ("TelloBridge") for the Tello to join,
+//   2. joins the phone hotspot as a WiFi station (STA) for internet,
+//   3. opens an outbound WebSocket to the backend `/ws/device` and authenticates
 //      with a `hello` frame,
-//   3. talks to the Tello over UDP:8889 (enters SDK mode, discovers the drone
-//      IP via UDP broadcast),
-//   4. relays backend `command` frames to the Tello and returns `result`s,
-//   5. runs an autonomous 5 s keepalive (`battery?`) so the Tello never hits its
+//   4. talks to the Tello over UDP:8889 on the AP subnet (enters SDK mode,
+//      discovers the drone IP via subnet broadcast),
+//   5. relays backend `command` frames to the Tello and returns `result`s,
+//   6. runs an autonomous 5 s keepalive (`battery?`) so the Tello never hits its
 //      15 s no-command auto-land — this does NOT depend on the internet link,
-//   6. drives a hardware emergency button that sends `land` straight to the
+//   7. drives a hardware emergency button that sends `land` straight to the
 //      Tello over UDP, even when the backend link is down.
 //
 // The wire protocol (message `type` strings, field names/types) and the numeric
@@ -64,6 +71,16 @@
 #ifndef FW_VERSION
 #define FW_VERSION "esp32s3-tello-relay/1.0.0"
 #endif
+// Soft-AP for Tello — the drone joins this network instead of the phone hotspot.
+#ifndef AP_SSID
+#define AP_SSID "TelloBridge"
+#endif
+#ifndef AP_PASS
+#define AP_PASS "tellovoice"
+#endif
+#ifndef AP_CHANNEL
+#define AP_CHANNEL 6
+#endif
 
 // ----------------------------------------------------------------------------
 // LIMITS — mirrored from src/protocol.ts (LIMITS). Keep in lockstep.
@@ -79,7 +96,7 @@ static const unsigned long KEEPALIVE_MS = 5000UL; // LIMITS.keepaliveMs
 // ----------------------------------------------------------------------------
 static const uint16_t TELLO_PORT      = 8889;  // Tello SDK command/response port
 static const uint16_t UDP_LOCAL_PORT  = 8889;  // local bind for replies
-static const IPAddress TELLO_BROADCAST(255, 255, 255, 255);
+static const IPAddress TELLO_BROADCAST(192, 168, 4, 255); // AP subnet broadcast
 static const unsigned long REPLY_TIMEOUT_MS   = 2000UL; // await a Tello reply
 static const unsigned long DISCOVERY_EVERY_MS = 3000UL; // rebroadcast when lost
 static const int LOST_MISS_THRESHOLD = 3;      // consecutive misses => tello_lost
@@ -178,24 +195,29 @@ void loop() {
 // WiFi
 // ============================================================================
 static void connectWiFi() {
-  Serial.printf("[wifi] joining SSID \"%s\" ...\n", WIFI_SSID);
-  WiFi.mode(WIFI_STA);
+  // ---- Soft-AP for Tello (starts immediately, no internet needed) ----------
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAP(AP_SSID, AP_PASS, AP_CHANNEL, /*hidden=*/0, /*max_conn=*/2);
+  Serial.printf("[wifi] AP started: SSID=\"%s\" ip=%s\n",
+                AP_SSID, WiFi.softAPIP().toString().c_str());
+
+  // ---- STA to phone hotspot (internet / backend WebSocket) ----------------
   WiFi.setSleep(false); // keep the link responsive for UDP relay + WS
+  Serial.printf("[wifi] joining STA SSID \"%s\" ...\n", WIFI_SSID);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
 
   unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED) {
-    // Keep the emergency button live even while WiFi is still coming up.
     pollEmergencyButton();
     delay(100);
     if (millis() - start > 20000UL) {
-      Serial.println(F("[wifi] retrying..."));
+      Serial.println(F("[wifi] STA retrying..."));
       WiFi.disconnect();
       WiFi.begin(WIFI_SSID, WIFI_PASS);
       start = millis();
     }
   }
-  Serial.print(F("[wifi] connected, ip="));
+  Serial.print(F("[wifi] STA connected, ip="));
   Serial.println(WiFi.localIP());
 }
 
@@ -395,7 +417,7 @@ static bool telloRecv(String &out, unsigned long timeoutMs) {
       int n = udp.read(buf, sizeof(buf) - 1);
       if (n < 0) n = 0;
       buf[n] = '\0';
-      if (from == WiFi.localIP()) continue; // ignore self (broadcast echo)
+      if (from == WiFi.localIP() || from == WiFi.softAPIP()) continue; // ignore self
       // First responder becomes / confirms the Tello.
       if (!telloKnown) {
         telloIp = from;

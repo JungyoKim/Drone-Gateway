@@ -12,11 +12,17 @@
 // -----------------------------------------------------------------------------
 #pragma once
 
-// ---- WiFi (phone hotspot) --------------------------------------------------
-// MUST be a 2.4 GHz network. The Tello only speaks 2.4 GHz and its SSID (when
-// you later put it in STA mode) must be alphanumeric. See README.md.
+// ---- WiFi STA (phone hotspot — for internet / backend) --------------------
+// MUST be a 2.4 GHz network. See README.md.
 #define WIFI_SSID   "YOUR_HOTSPOT_SSID"
 #define WIFI_PASS   "YOUR_HOTSPOT_PASSWORD"
+
+// ---- WiFi AP (local network for Tello) -------------------------------------
+// The ESP32 runs a soft-AP that the Tello joins via `ap TelloBridge tellovoice`.
+// SSID must be alphanumeric (Tello limitation). Password ≥ 8 chars for WPA2.
+#define AP_SSID     "TelloBridge"
+#define AP_PASS     "tellovoice"
+#define AP_CHANNEL  6                  // 1-13, pick a quiet 2.4 GHz channel
 
 // ---- Backend WebSocket (outbound / dial-out) -------------------------------
 // Points at the deployed Dokploy backend. Uses wss on 443 (Let's Encrypt).
