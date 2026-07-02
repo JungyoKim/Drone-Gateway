@@ -116,6 +116,21 @@ and expects `{ "type": "welcome", "ok": true }` back.
 IP) while still reaching the backend over the phone hotspot for cloud voice. All three
 modes talk to the Tello by **unicast** (see discovery, below).
 
+## Config portal (change WiFi without reflashing)
+
+On boot the ESP32 serves a small web form (port 80) to change the **phone hotspot
+SSID/password** and the **device token** at runtime — saved to NVS, no reflash needed.
+Join the `TelloBridge` AP and open any of:
+
+- **auto pop-up** — a captive-portal prompt appears on join (like a WiFi login page)
+- **`http://tello.local`** — mDNS (`CONFIG_HOST`)
+- **`http://192.168.4.1`** — the AP IP (always works)
+
+Enter a password only to change it (blank = keep current); **Save → reboots** to apply.
+The AP itself (`AP_SSID` / `AP_PASS`) is **fixed at compile time and not editable** from
+the portal. The AP + portal come up even if the hotspot is down, so bad hotspot creds are
+always recoverable. Disable with `-DCONFIG_PORTAL=0`.
+
 ## Status LED (WS2812)
 
 If `LED_ENABLE=1`, the onboard addressable LED shows state (idle colors; brief flashes on
