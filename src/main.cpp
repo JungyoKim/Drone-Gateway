@@ -42,7 +42,6 @@
 #include <WebServer.h>
 #include <Preferences.h>
 #include <ESPmDNS.h>
-#include <DNSServer.h>
 
 // ----------------------------------------------------------------------------
 // Configuration — from src/config.h (copy config.h.example) or -D build flags.
@@ -108,14 +107,13 @@
 #define USE_STA (NET_MODE == NET_STA || NET_MODE == NET_AP_STA)
 #define HAS_BACKEND USE_STA
 
-// HTTP config portal: a small web form (port 80) to change WiFi/AP credentials
-// and the device token at runtime, persisted to NVS — no reflash needed. Reach
-// it at http://192.168.4.1, http://tello.local (mDNS), or — when joined to the
-// TelloBridge AP — any address (captive-portal DNS redirects to the form).
+// HTTP config portal: a small web form (port 80) to change the phone-hotspot
+// SSID/password at runtime, persisted to NVS — no reflash needed. Reach it at
+// http://192.168.4.1 or http://tello.local (mDNS).
 #ifndef CONFIG_PORTAL
 #define CONFIG_PORTAL 1
 #endif
-// mDNS/captive hostname: http://<CONFIG_HOST>.local
+// mDNS hostname: http://<CONFIG_HOST>.local
 #ifndef CONFIG_HOST
 #define CONFIG_HOST "tello"
 #endif
@@ -173,9 +171,6 @@ static String cfgStaPass  = WIFI_PASS;
 static String cfgToken    = DEVICE_TOKEN;
 #if CONFIG_PORTAL
 static WebServer httpServer(80);
-#if USE_AP
-static DNSServer dnsServer;   // captive-portal catch-all on the AP
-#endif
 #endif
 
 static IPAddress telloIp;               // discovered drone IP
@@ -280,9 +275,6 @@ void loop() {
   webSocket.loop();      // pump WS: connect/reconnect, dispatch frames
 #endif
 #if CONFIG_PORTAL
-#if USE_AP
-  dnsServer.processNextRequest(); // captive-portal DNS catch-all
-#endif
   httpServer.handleClient(); // serve the config form
 #endif
   pollEmergencyButton(); // safety first — must run every iteration
@@ -843,15 +835,10 @@ static void handleConfigRoot() {
          "<input name=sta_ssid value=\"");
   h += htmlEscape(cfgStaSsid);
   h += F("\"><label>폰 핫스팟 비밀번호</label>"
-         "<input name=sta_pass type=password placeholder=\"(변경 시에만 입력)\">");
-  h += F("<label>디바이스 토큰 (백엔드와 일치해야 함)</label><input name=token value=\"");
-  h += htmlEscape(cfgToken);
-  h += F("\"><label>드론 AP (고정 · 변경 불가)</label>"
-         "<input value=\"" AP_SSID "\" disabled>"
-         "<button type=submit>저장 후 재부팅</button></form>"
-         "<p class=s>비밀번호를 비워두면 기존 값이 유지됩니다. "
-         "저장하면 변경 사항 적용을 위해 재부팅합니다. "
-         "드론이 접속하는 AP(" AP_SSID ")와 그 비밀번호는 고정이라 여기서 바꿀 수 없습니다.</p>"
+         "<input name=sta_pass value=\"");
+  h += htmlEscape(cfgStaPass);
+  h += F("\"><button type=submit>저장 후 재부팅</button></form>"
+         "<p class=s>저장하면 변경 사항 적용을 위해 재부팅합니다.</p>"
          "</body></html>");
   httpServer.send(200, "text/html", h);
 }
@@ -859,9 +846,7 @@ static void handleConfigRoot() {
 static void handleConfigSave() {
   prefs.begin("tello", /*readOnly=*/false);
   if (httpServer.hasArg("sta_ssid")) prefs.putString("sta_ssid", httpServer.arg("sta_ssid"));
-  if (httpServer.hasArg("token"))    prefs.putString("token",    httpServer.arg("token"));
-  // Only overwrite the STA password when a non-empty value was submitted.
-  if (httpServer.arg("sta_pass").length()) prefs.putString("sta_pass", httpServer.arg("sta_pass"));
+  if (httpServer.hasArg("sta_pass")) prefs.putString("sta_pass", httpServer.arg("sta_pass"));
   prefs.end();
   httpServer.send(200, "text/html",
     F("<!doctype html><meta charset=utf-8>"
@@ -874,17 +859,6 @@ static void handleConfigSave() {
 static void startConfigPortal() {
   httpServer.on("/", HTTP_GET, handleConfigRoot);
   httpServer.on("/save", HTTP_POST, handleConfigSave);
-  // OS captive-portal probes -> redirect to the form so it auto-pops.
-  auto redirect = []() {
-    httpServer.sendHeader("Location", String("http://") + WiFi.softAPIP().toString() + "/");
-    httpServer.send(302, "text/plain", "");
-  };
-  httpServer.on("/generate_204", redirect);        // Android
-  httpServer.on("/gen_204", redirect);              // Android
-  httpServer.on("/hotspot-detect.html", redirect);  // iOS/macOS
-  httpServer.on("/canonical.html", redirect);       // Firefox
-  httpServer.on("/ncsi.txt", redirect);             // Windows
-  httpServer.onNotFound(redirect);                  // anything else -> form
   httpServer.begin();
 
   // Friendly hostname on both interfaces: http://<CONFIG_HOST>.local
@@ -892,18 +866,12 @@ static void startConfigPortal() {
     MDNS.addService("http", "tcp", 80);
     Serial.printf("[cfg] mDNS: http://%s.local/\n", CONFIG_HOST);
   }
-
-#if USE_AP
-  // Captive-portal DNS: answer every query with our AP IP so any URL -> form.
-  dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
-  dnsServer.start(53, "*", WiFi.softAPIP());
-  Serial.print(F("[cfg] captive DNS on AP; portal at http://"));
-  Serial.print(WiFi.softAPIP());
-  Serial.println(F("/"));
-#else
   Serial.print(F("[cfg] portal at http://"));
+#if USE_AP
+  Serial.print(WiFi.softAPIP());
+#else
   Serial.print(WiFi.localIP());
-  Serial.println(F("/"));
 #endif
+  Serial.println(F("/"));
 }
 #endif // CONFIG_PORTAL
