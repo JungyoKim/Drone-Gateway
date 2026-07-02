@@ -17,12 +17,22 @@
 #define WIFI_SSID   "YOUR_HOTSPOT_SSID"
 #define WIFI_PASS   "YOUR_HOTSPOT_PASSWORD"
 
-// ---- WiFi AP (local network for Tello) -------------------------------------
-// The ESP32 runs a soft-AP that the Tello joins via `ap TelloBridge tellovoice`.
-// SSID must be alphanumeric (Tello limitation). Password ≥ 8 chars for WPA2.
+// ---- Network mode ----------------------------------------------------------
+// 0 = STA only : ESP32 + Tello both join the phone hotspot (Tello via
+//                `ap <phoneSSID> <pass>`). Relies on hotspot client-to-client.
+// 1 = AP only  : ESP32 is a standalone AP for the Tello. No internet / no voice.
+// 2 = AP + STA : ESP32 runs its own AP (Tello joins it) AND joins the phone
+//                hotspot for the backend. Recommended — predictable Tello IP,
+//                no hotspot broadcast/isolation issues. (verified working)
+#define NET_MODE    2
+
+// ---- WiFi AP (local network for Tello; used when NET_MODE is 1 or 2) --------
+// The Tello joins this via a one-time `ap TelloBridge tellovoice` (sent while
+// connected to the Tello's own TELLO-XXXXXX / RMTT-XXXXXX WiFi). SSID must be
+// alphanumeric (Tello limitation). Password >= 8 chars for WPA2.
 #define AP_SSID     "TelloBridge"
 #define AP_PASS     "tellovoice"
-#define AP_CHANNEL  6                  // 1-13, pick a quiet 2.4 GHz channel
+#define AP_CHANNEL  6                  // 1-13, quiet 2.4 GHz channel
 
 // ---- Backend WebSocket (outbound / dial-out) -------------------------------
 // Points at the deployed Dokploy backend. Uses wss on 443 (Let's Encrypt).
@@ -35,3 +45,11 @@
 #define DEVICE_ID    "tello-esp32-01"
 #define DEVICE_TOKEN "dev-device-token"          // must match backend DEVICE_TOKEN
 #define FW_VERSION   "esp32s3-tello-relay/1.0.0"
+
+// ---- RGB status LED (WS2812/NeoPixel) --------------------------------------
+// Most generic ESP32-S3 devkits wire the addressable LED to GPIO48 (some 38).
+// If the LED stays dark or shows wrong colors, try LED_PIN 38. Set LED_ENABLE 0
+// if your board has no addressable LED.
+#define LED_ENABLE     1
+#define LED_PIN        48
+#define LED_BRIGHTNESS 30             // 0-255; all states use this brightness

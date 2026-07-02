@@ -11,6 +11,12 @@ never accept an inbound connection). Once connected it relays Tello SDK command 
 polls battery to keep the drone alive, and — critically — drives a **hardware emergency
 button that lands the drone over UDP even when the internet link is down**.
 
+**Network (default `NET_MODE 2`, AP+STA):** the ESP32 runs its **own soft-AP
+`TelloBridge`** that the Tello joins, **and** connects to the phone hotspot as a station
+for the backend. The Tello sits on the ESP32's own subnet (`192.168.4.x`) with a
+predictable DHCP IP — no reliance on phone-hotspot client-to-client forwarding. See
+**Network mode** below for STA-only / AP-only alternatives.
+
 The wire protocol and numeric limits are mirrored **exactly** from
 [`../src/protocol.ts`](../src/protocol.ts) (the single source of truth). `main.cpp` calls
 out each mirrored constant/field.
@@ -61,8 +67,12 @@ it automatically via `#if __has_include("config.h")`.
 
 | Field | Meaning |
 |---|---|
-| `WIFI_SSID` | Phone-hotspot SSID. **Must be 2.4 GHz** (see below). |
+| `NET_MODE` | `2` = AP+STA (default), `1` = AP-only, `0` = STA-only. See **Network mode**. |
+| `WIFI_SSID` | Phone-hotspot SSID (STA modes). **Must be 2.4 GHz** (see below). |
 | `WIFI_PASS` | Hotspot password. |
+| `AP_SSID` | Soft-AP SSID the Tello joins (AP modes). Alphanumeric. Default `TelloBridge`. |
+| `AP_PASS` | Soft-AP password (≥ 8 chars for WPA2). Default `tellovoice`. |
+| `AP_CHANNEL` | Soft-AP channel `1–13`. Default `6`. |
 | `WS_HOST` | Backend host only — no scheme, no path (e.g. `api.example.com`). |
 | `WS_PORT` | `443` for `wss`, or `8080` (or your dev port) for plain `ws`. |
 | `WS_PATH` | Fixed: `/ws/device` (the backend's device endpoint). |
@@ -70,6 +80,7 @@ it automatically via `#if __has_include("config.h")`.
 | `DEVICE_ID` | Identifier sent in the `hello` frame. |
 | `DEVICE_TOKEN` | Shared secret; **must equal the backend's `DEVICE_TOKEN`** env var. |
 | `FW_VERSION` | Reported in the `hello` frame's `fw` field. |
+| `LED_ENABLE` / `LED_PIN` / `LED_BRIGHTNESS` | WS2812 status LED (default on, GPIO48, brightness 30). |
 
 The device authenticates by sending, on connect:
 
@@ -93,12 +104,42 @@ and expects `{ "type": "welcome", "ok": true }` back.
 
 ---
 
-## One-time Tello STA-mode setup (`ap`)
+## Network mode (`NET_MODE`)
 
-Out of the box the Tello is its own WiFi **access point**; you connect *to it*. For this
-project the Tello must instead **join the phone hotspot** so it gets a DHCP IP the ESP32
-can reach. This is a **one-time** `ap` command you send from a laptop while connected to
-the Tello's own AP:
+| Mode | ESP32 radio | Tello joins | Backend / voice | Notes |
+|---|---|---|---|---|
+| `2` **AP+STA** (default) | own AP **+** hotspot STA | ESP32's `TelloBridge` AP | ✅ | Tello on `192.168.4.x`, predictable IP. **Verified working.** |
+| `1` AP-only | own AP | ESP32's `TelloBridge` AP | ❌ | Local control only (no internet). Good for bench tests. |
+| `0` STA-only | hotspot STA | the **phone hotspot** | ✅ | Both peers on the hotspot LAN; relies on client-to-client unicast. |
+
+`2` is recommended: the ESP32 owns the Tello's network (stable association, known DHCP
+IP) while still reaching the backend over the phone hotspot for cloud voice. All three
+modes talk to the Tello by **unicast** (see discovery, below).
+
+## Status LED (WS2812)
+
+If `LED_ENABLE=1`, the onboard addressable LED shows state (idle colors; brief flashes on
+events):
+
+| Color | Meaning |
+|---|---|
+| 🔴 red | backend not connected (STA modes) / Tello not found yet (AP-only) |
+| 🟡 yellow | backend up, Tello not found yet (STA modes) |
+| 🟢 green | ready — backend up **and** Tello found |
+| 🔵 blue (flash) | relaying a command |
+| 🩵 cyan (flash) | command accepted |
+| 🟣 magenta (flash) | command rejected / timed out |
+| 🔴 red (1 s) | emergency-button `land` sent |
+
+Generic S3 devkits usually wire the LED to **GPIO48** (some use 38 — set `LED_PIN`).
+
+## One-time Tello station-mode setup (`ap`)
+
+Out of the box the Tello is its own WiFi **access point** (`TELLO-XXXXXX` /
+`RMTT-XXXXXX`); you connect *to it*. For this project the Tello must instead **join the
+ESP32's `TelloBridge` AP** (default `NET_MODE 2`) so it gets a DHCP IP on the ESP32's
+`192.168.4.x` subnet. This is a **one-time** `ap` command sent from a laptop while
+connected to the Tello's own AP:
 
 1. Power on the Tello. On a laptop, join its WiFi AP `TELLO-XXXXXX`.
 2. Send the SDK handshake, then the `ap` command, to `192.168.10.1:8889` over UDP. Using
@@ -107,34 +148,48 @@ the Tello's own AP:
    ```sh
    # enter SDK mode first
    echo -n "command" | nc -u -w1 192.168.10.1 8889
-   # then push it onto YOUR 2.4GHz hotspot (alphanumeric SSID!)
-   echo -n "ap MyHotspot24 MyPassword" | nc -u -w1 192.168.10.1 8889
+   # then push it onto the ESP32's AP (must match AP_SSID / AP_PASS in config.h)
+   echo -n "ap TelloBridge tellovoice" | nc -u -w1 192.168.10.1 8889
    ```
 
-3. The Tello replies `ok` and reboots into **station mode**, joining your hotspot. It now
-   pulls a DHCP address on the hotspot subnet. This setting **persists** across reboots
-   (to undo it, factory-reset the Tello by holding its power button ~5 s).
+   > On Windows, bind the UDP socket to the Tello-facing adapter IP if a wired NIC shares
+   > the same `192.168.10.x` subnet, or the packet may egress the wrong interface.
+   >
+   > For `NET_MODE 0` (STA-only) push it onto your phone hotspot instead:
+   > `ap MyHotspot24 MyPassword` (alphanumeric SSID).
 
-From then on, power-up order is: **phone hotspot on → Tello on (auto-joins) → ESP32 on**.
-The ESP32 discovers the Tello's DHCP IP automatically (below) — you never hardcode it.
+3. The Tello replies `OK,drone will reboot in 3s` and reboots into **station mode**,
+   joining `TelloBridge`. The setting **persists** across reboots (to undo it,
+   factory-reset the Tello by holding its power button ~5 s).
+
+Power-up order: **ESP32 on (AP up) → Tello on (auto-joins TelloBridge)**. In `NET_MODE 2`
+the ESP32 also needs the phone hotspot up for the backend. The ESP32 discovers the
+Tello's IP automatically (below) — you never hardcode it.
 
 ### How discovery works (no hardcoded Tello IP)
 
-On boot (and whenever the drone goes quiet) the ESP32 **UDP-broadcasts** `command` to
-`255.255.255.255:8889` and captures the **responder's IP** as the Tello. It reports
-`{"type":"event","event":"tello_found","detail":"<ip>"}` to the backend, and
-`{"type":"event","event":"tello_lost"}` if the drone stops replying (3 consecutive
-missed replies).
+Neither the ESP32 soft-AP nor an iOS Personal Hotspot forwards a UDP **broadcast** to
+associated clients, so discovery is **unicast**:
+
+- **AP modes (`1`/`2`):** the ESP32 is the DHCP server, so it learns the Tello's IP from
+  the DHCP-lease event, then unicasts `command` to it to enter SDK mode.
+- **STA-only (`0`):** the ESP32 unicast-sweeps its `/28` hotspot subnet (a few hosts per
+  pass) until a device replies.
+
+On success it reports `{"type":"event","event":"tello_found","detail":"<ip>"}` to the
+backend, and `{"type":"event","event":"tello_lost"}` if the drone stops replying
+(3 consecutive missed replies).
 
 ---
 
 ## Runtime behavior
 
-1. **WiFi STA** — joins the hotspot (`WIFI_SSID`/`WIFI_PASS`), retries on failure.
-2. **Backend link** — outbound WS/WSS to `WS_HOST:WS_PORT` `WS_PATH`, auto-reconnects
-   every 3 s, sends `hello` on connect.
-3. **Tello UDP** — binds local UDP `8889`, enters SDK mode + discovers the drone by
-   broadcast.
+1. **WiFi** — brings up the interface per `NET_MODE`: soft-AP `TelloBridge` for the Tello
+   (AP modes) and/or STA to the hotspot (`WIFI_SSID`/`WIFI_PASS`, retries on failure).
+2. **Backend link** (STA modes) — outbound WS/WSS to `WS_HOST:WS_PORT` `WS_PATH`,
+   auto-reconnects every 3 s, sends `hello` on connect.
+3. **Tello UDP** — binds local UDP `8889`, discovers the drone by **unicast** (DHCP-lease
+   IP in AP modes, subnet sweep in STA-only), then enters SDK mode with `command`.
 4. **Command relay** — on `{type:"command", id, tello, meta}` from the backend, sends the
    raw `tello` string over UDP, waits ~2 s for the reply, then returns
    `{type:"result", id, response, ok}`. `ok` follows the Tello convention: `"ok"` or a
