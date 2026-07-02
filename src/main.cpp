@@ -39,6 +39,10 @@
 #include <WiFiClientSecure.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
+#include <WebServer.h>
+#include <Preferences.h>
+#include <ESPmDNS.h>
+#include <DNSServer.h>
 
 // ----------------------------------------------------------------------------
 // Configuration — from src/config.h (copy config.h.example) or -D build flags.
@@ -104,6 +108,18 @@
 #define USE_STA (NET_MODE == NET_STA || NET_MODE == NET_AP_STA)
 #define HAS_BACKEND USE_STA
 
+// HTTP config portal: a small web form (port 80) to change WiFi/AP credentials
+// and the device token at runtime, persisted to NVS — no reflash needed. Reach
+// it at http://192.168.4.1, http://tello.local (mDNS), or — when joined to the
+// TelloBridge AP — any address (captive-portal DNS redirects to the form).
+#ifndef CONFIG_PORTAL
+#define CONFIG_PORTAL 1
+#endif
+// mDNS/captive hostname: http://<CONFIG_HOST>.local
+#ifndef CONFIG_HOST
+#define CONFIG_HOST "tello"
+#endif
+
 // RGB status LED (WS2812/NeoPixel). Generic ESP32-S3 devkits usually wire it to
 // GPIO48 (some use 38). Set LED_ENABLE 0 for boards with no addressable LED.
 #ifndef LED_ENABLE
@@ -147,6 +163,21 @@ static const unsigned long DEBOUNCE_MS = 40; // stable-state debounce window
 static WebSocketsClient webSocket;
 static WiFiUDP udp;
 
+// Runtime configuration (NVS-backed; falls back to the compiled config.h values).
+// Only the STA (phone hotspot) creds and the device token are user-editable via
+// the config portal. The AP SSID/password (AP_SSID / AP_PASS) are FIXED at
+// compile time and never change at runtime.
+static Preferences prefs;
+static String cfgStaSsid  = WIFI_SSID;
+static String cfgStaPass  = WIFI_PASS;
+static String cfgToken    = DEVICE_TOKEN;
+#if CONFIG_PORTAL
+static WebServer httpServer(80);
+#if USE_AP
+static DNSServer dnsServer;   // captive-portal catch-all on the AP
+#endif
+#endif
+
 static IPAddress telloIp;               // discovered drone IP
 static bool  telloKnown       = false;  // have we heard from the Tello?
 #if USE_AP
@@ -176,6 +207,12 @@ static uint8_t ledFlashR = 0, ledFlashG = 0, ledFlashB = 0;
 // Forward declarations.
 // ----------------------------------------------------------------------------
 static void connectWiFi();
+static void loadConfig();
+#if CONFIG_PORTAL
+static void startConfigPortal();
+static void handleConfigRoot();
+static void handleConfigSave();
+#endif
 static void wsEvent(WStype_t type, uint8_t *payload, size_t length);
 static void sendJson(JsonDocument &doc);
 static void sendHello();
@@ -212,6 +249,7 @@ void setup() {
 
   pinMode(EMERGENCY_PIN, INPUT_PULLUP);
   ledInit();
+  loadConfig(); // NVS overrides of WiFi/AP/token before we bring up WiFi
 
   connectWiFi();
 
@@ -231,11 +269,21 @@ void setup() {
 #else
   Serial.println(F("[boot] no backend (AP-only mode) — local control only"));
 #endif
+
+#if CONFIG_PORTAL
+  startConfigPortal(); // http://192.168.4.1 (AP) or the STA IP
+#endif
 }
 
 void loop() {
 #if HAS_BACKEND
   webSocket.loop();      // pump WS: connect/reconnect, dispatch frames
+#endif
+#if CONFIG_PORTAL
+#if USE_AP
+  dnsServer.processNextRequest(); // captive-portal DNS catch-all
+#endif
+  httpServer.handleClient(); // serve the config form
 #endif
   pollEmergencyButton(); // safety first — must run every iteration
   if (!telloKnown) discoverTello(); // unicast sweep (internally rate-limited)
@@ -292,19 +340,31 @@ static void connectWiFi() {
 
 #if USE_STA
   // Join the phone hotspot for the backend link (and, in NET_STA, to share the
-  // LAN with the Tello). Keep the emergency button live while it comes up.
-  Serial.printf("[wifi] joining STA SSID \"%s\" ...\n", WIFI_SSID);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  // LAN with the Tello). Auto-reconnect keeps trying in the background.
+  WiFi.setAutoReconnect(true);
+  Serial.printf("[wifi] joining STA SSID \"%s\" ...\n", cfgStaSsid.c_str());
+  WiFi.begin(cfgStaSsid.c_str(), cfgStaPass.c_str());
   unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED) {
     pollEmergencyButton();
     delay(100);
+#if USE_AP
+    // AP modes: don't block boot on the hotspot — the AP + config portal must
+    // come up even if the hotspot is off (that's how you'd fix bad creds).
+    // WiFi keeps auto-reconnecting; the backend WS connects once STA is up.
+    if (millis() - start > 8000UL) {
+      Serial.println(F("[wifi] STA not up yet — continuing (AP+portal live, will retry in bg)"));
+      return;
+    }
+#else
+    // STA-only: nothing works without the hotspot, so keep retrying.
     if (millis() - start > 20000UL) {
       Serial.println(F("[wifi] STA retrying..."));
       WiFi.disconnect();
-      WiFi.begin(WIFI_SSID, WIFI_PASS);
+      WiFi.begin(cfgStaSsid.c_str(), cfgStaPass.c_str());
       start = millis();
     }
+#endif
   }
   Serial.print(F("[wifi] STA connected, ip="));
   Serial.println(WiFi.localIP());
@@ -368,7 +428,7 @@ static void sendHello() {
   JsonDocument doc;
   doc["type"]     = "hello";
   doc["deviceId"] = DEVICE_ID;
-  doc["token"]    = DEVICE_TOKEN;
+  doc["token"]    = cfgToken;
   doc["fw"]       = FW_VERSION;
   sendJson(doc);
 }
@@ -726,3 +786,124 @@ static void ledTick() {
   }
 #endif
 }
+
+// ============================================================================
+// Runtime config (NVS) + HTTP config portal
+// ============================================================================
+// Load saved overrides from NVS. Any key absent -> keep the compiled default
+// (already assigned to the cfg* globals). Namespace "tello", read-only here.
+static void loadConfig() {
+  prefs.begin("tello", /*readOnly=*/true);
+  cfgStaSsid = prefs.getString("sta_ssid", cfgStaSsid);
+  cfgStaPass = prefs.getString("sta_pass", cfgStaPass);
+  cfgToken   = prefs.getString("token",    cfgToken);
+  prefs.end();
+  Serial.printf("[cfg] sta=\"%s\" ap=\"%s\"(fixed) (token %s)\n",
+                cfgStaSsid.c_str(), AP_SSID,
+                cfgToken.length() ? "set" : "empty");
+}
+
+#if CONFIG_PORTAL
+// Minimal HTML escaping for values echoed into attributes.
+static String htmlEscape(const String &s) {
+  String o; o.reserve(s.length() + 8);
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    if (c == '&') o += "&amp;";
+    else if (c == '<') o += "&lt;";
+    else if (c == '>') o += "&gt;";
+    else if (c == '"') o += "&quot;";
+    else o += c;
+  }
+  return o;
+}
+
+static void handleConfigRoot() {
+  String staIp = WiFi.localIP().toString();
+  String apIp  = WiFi.softAPIP().toString();
+  String h;
+  h.reserve(2200);
+  h += F("<!doctype html><html lang=ko><head><meta charset=utf-8>"
+         "<meta name=viewport content='width=device-width,initial-scale=1'>"
+         "<title>텔로 브리지 설정</title><style>"
+         "body{font:16px/1.5 -apple-system,system-ui,sans-serif;max-width:480px;"
+         "margin:0 auto;padding:20px;background:#0b0f14;color:#e7edf3}"
+         "h1{font-size:20px}label{display:block;margin:14px 0 4px;color:#90a0b3;font-size:13px}"
+         "input{width:100%;box-sizing:border-box;padding:11px;border-radius:8px;"
+         "border:1px solid #26313f;background:#18222f;color:#e7edf3;font-size:16px}"
+         "input:disabled{opacity:.6}"
+         "button{width:100%;margin-top:20px;padding:14px;border:0;border-radius:10px;"
+         "background:#2f9be0;color:#fff;font-size:17px;font-weight:700}"
+         ".s{font-size:13px;color:#90a0b3;margin:6px 0 16px}</style></head><body>");
+  h += F("<h1>텔로 브리지 설정</h1><div class=s>");
+  h += "핫스팟 연결: " + (staIp == "0.0.0.0" ? String("연결 안 됨") : staIp);
+  h += " &middot; AP 주소: " + apIp;
+  h += F("</div><form method=POST action=/save>");
+  h += F("<label>폰 핫스팟 이름 (SSID)</label>"
+         "<input name=sta_ssid value=\"");
+  h += htmlEscape(cfgStaSsid);
+  h += F("\"><label>폰 핫스팟 비밀번호</label>"
+         "<input name=sta_pass type=password placeholder=\"(변경 시에만 입력)\">");
+  h += F("<label>디바이스 토큰 (백엔드와 일치해야 함)</label><input name=token value=\"");
+  h += htmlEscape(cfgToken);
+  h += F("\"><label>드론 AP (고정 · 변경 불가)</label>"
+         "<input value=\"" AP_SSID "\" disabled>"
+         "<button type=submit>저장 후 재부팅</button></form>"
+         "<p class=s>비밀번호를 비워두면 기존 값이 유지됩니다. "
+         "저장하면 변경 사항 적용을 위해 재부팅합니다. "
+         "드론이 접속하는 AP(" AP_SSID ")와 그 비밀번호는 고정이라 여기서 바꿀 수 없습니다.</p>"
+         "</body></html>");
+  httpServer.send(200, "text/html", h);
+}
+
+static void handleConfigSave() {
+  prefs.begin("tello", /*readOnly=*/false);
+  if (httpServer.hasArg("sta_ssid")) prefs.putString("sta_ssid", httpServer.arg("sta_ssid"));
+  if (httpServer.hasArg("token"))    prefs.putString("token",    httpServer.arg("token"));
+  // Only overwrite the STA password when a non-empty value was submitted.
+  if (httpServer.arg("sta_pass").length()) prefs.putString("sta_pass", httpServer.arg("sta_pass"));
+  prefs.end();
+  httpServer.send(200, "text/html",
+    F("<!doctype html><meta charset=utf-8>"
+      "<body style='font:16px sans-serif;background:#0b0f14;color:#e7edf3;padding:24px'>"
+      "저장했습니다. 재부팅 중… 네트워크에 다시 연결한 뒤 이 페이지를 다시 여세요.</body>"));
+  delay(400);
+  ESP.restart();
+}
+
+static void startConfigPortal() {
+  httpServer.on("/", HTTP_GET, handleConfigRoot);
+  httpServer.on("/save", HTTP_POST, handleConfigSave);
+  // OS captive-portal probes -> redirect to the form so it auto-pops.
+  auto redirect = []() {
+    httpServer.sendHeader("Location", String("http://") + WiFi.softAPIP().toString() + "/");
+    httpServer.send(302, "text/plain", "");
+  };
+  httpServer.on("/generate_204", redirect);        // Android
+  httpServer.on("/gen_204", redirect);              // Android
+  httpServer.on("/hotspot-detect.html", redirect);  // iOS/macOS
+  httpServer.on("/canonical.html", redirect);       // Firefox
+  httpServer.on("/ncsi.txt", redirect);             // Windows
+  httpServer.onNotFound(redirect);                  // anything else -> form
+  httpServer.begin();
+
+  // Friendly hostname on both interfaces: http://<CONFIG_HOST>.local
+  if (MDNS.begin(CONFIG_HOST)) {
+    MDNS.addService("http", "tcp", 80);
+    Serial.printf("[cfg] mDNS: http://%s.local/\n", CONFIG_HOST);
+  }
+
+#if USE_AP
+  // Captive-portal DNS: answer every query with our AP IP so any URL -> form.
+  dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
+  dnsServer.start(53, "*", WiFi.softAPIP());
+  Serial.print(F("[cfg] captive DNS on AP; portal at http://"));
+  Serial.print(WiFi.softAPIP());
+  Serial.println(F("/"));
+#else
+  Serial.print(F("[cfg] portal at http://"));
+  Serial.print(WiFi.localIP());
+  Serial.println(F("/"));
+#endif
+}
+#endif // CONFIG_PORTAL

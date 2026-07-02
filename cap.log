@@ -1,0 +1,21 @@
+E (194) psram: PSRAM ID read error: 0x00ffffff, PSRAM chip not found or not supported, or wrong PSRAM line mode
+[   193][W][esp32-hal-psram.c:71] psramInit(): PSRAM init failed!
+[boot] tellovoice ESP32-S3 relay esp32s3-tello-relay/1.0.0
+[   434][E][Preferences.cpp:483] getString(): nvs_get_str len fail: sta_pass NOT_FOUND
+[cfg] sta="iPhone" ap="TelloBridge"(fixed) (token set)
+[wifi] AP up: SSID="TelloBridge" ip=192.168.4.1 ch=6
+[wifi] joining STA SSID "iPhone" ...
+[  3372][W][WiFiGeneric.cpp:1062] _eventCallback(): Reason: 201 - NO_AP_FOUND
+[  6236][W][WiFiGeneric.cpp:1062] _eventCallback(): Reason: 201 - NO_AP_FOUND
+[wifi] STA not up yet — continuing (AP+portal live, will retry in bg)
+[cfg] mDNS: http://tello.local/
+[cfg] captive DNS on AP; portal at http://192.168.4.1/
+[  8634][E][WiFiGeneric.cpp:1583] hostByName(): DNS Failed for drone.xenv.cc
+[ws] disconnected
+[  9101][W][WiFiGeneric.cpp:1062] _eventCallback(): Reason: 201 - NO_AP_FOUND
+[ 11649][E][WiFiGeneric.cpp:1583] hostByName(): DNS Failed for drone.xenv.cc
+[ws] disconnected
+[ 11982][W][WiFiGeneric.cpp:1062] _eventCallback(): Reason: 201 - NO_AP_FOUND
+[ 14659][E][WiFiGeneric.cpp:1583] hostByName(): DNS Failed for drone.xenv.cc
+[ws] disconnected
+[ 14857][W][WiFiGeneric.cpp:1062] _eventCallback(): Reason: 201 - NO_AP_FOUND

@@ -31,7 +31,7 @@
 // connected to the Tello's own TELLO-XXXXXX / RMTT-XXXXXX WiFi). SSID must be
 // alphanumeric (Tello limitation). Password >= 8 chars for WPA2.
 #define AP_SSID     "TelloBridge"
-#define AP_PASS     "tellovoice"
+#define AP_PASS     "147258369"        // fixed; not editable via the config portal
 #define AP_CHANNEL  6                  // 1-13, quiet 2.4 GHz channel
 
 // ---- Backend WebSocket (outbound / dial-out) -------------------------------
