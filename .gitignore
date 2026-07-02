@@ -2,3 +2,8 @@
 .pio/
 # Local secrets (WiFi creds, device token) — never commit
 src/config.h
+
+# local debug capture scripts
+cap.py
+cap*.py
+cap.log
