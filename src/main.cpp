@@ -714,14 +714,38 @@ static void relayVideoPackets() {
                             // itself only follows discovery — defensive guard.
   static uint8_t buf[1472]; // standard max UDP payload under Ethernet MTU
   const int MAX_PACKETS_PER_LOOP = 16; // safety cap — never starve the rest of loop()
+  // Diagnostic counters -- the relay itself is fire-and-forget (UDP, no ack),
+  // so this periodic summary is the only visibility into whether Tello is
+  // actually sending video at all vs. the ESP32 silently relaying nothing.
+  // "0 packets" here means the problem is Tello <-> ESP32 (streamon in
+  // station mode is not confirmed reliable, see firmware/README.md), NOT
+  // the ESP32 -> backend leg, which this counter never touches.
+  static uint32_t rxPackets = 0, rxBytes = 0;
+  static unsigned long lastVideoLogMs = 0;
   for (int i = 0; i < MAX_PACKETS_PER_LOOP; i++) {
     int sz = videoUdpIn.parsePacket();
     if (sz <= 0) break; // nothing waiting — drain complete for this iteration
     int n = videoUdpIn.read(buf, sizeof(buf));
     if (n <= 0) continue; // spurious/empty read — skip, don't relay garbage
+    rxPackets++;
+    rxBytes += n;
     videoUdpOut.beginPacket(VIDEO_HOST, VIDEO_PORT);
     videoUdpOut.write(buf, n);
     videoUdpOut.endPacket();
+  }
+  const unsigned long now = millis();
+  if (now - lastVideoLogMs >= 2000UL) {
+    if (rxPackets > 0) {
+      Serial.printf("[video] rx %lu pkts (%lu bytes) from Tello in last 2s -> relayed to %s:%d\n",
+                    (unsigned long)rxPackets, (unsigned long)rxBytes, VIDEO_HOST, VIDEO_PORT);
+    } else {
+      Serial.println(F("[video] 0 packets from Tello in last 2s (Tello <-> ESP32 leg -- "
+                        "not the backend relay) -- streamon may not actually be streaming "
+                        "in station mode"));
+    }
+    rxPackets = 0;
+    rxBytes = 0;
+    lastVideoLogMs = now;
   }
 }
 
