@@ -27,6 +27,10 @@
 //      15 s no-command auto-land — this does NOT depend on the internet link,
 //   6. drives a hardware emergency button that sends `land` straight to the
 //      Tello over UDP, even when the backend link is down.
+//   7. relays Tello's raw UDP video stream (port 11111) verbatim to the
+//      backend's video ingest port (VIDEO_HOST/VIDEO_PORT) for ArUco tracking,
+//   8. accepts a fire-and-forget `rc a b c d` frame from the backend during
+//      tracking mode and forwards it straight to the Tello (no reply awaited).
 //
 // The wire protocol (message `type` strings, field names/types) and the numeric
 // LIMITS below are mirrored EXACTLY from ../../src/protocol.ts — that file is the
@@ -68,6 +72,14 @@
 #endif
 #ifndef WS_USE_TLS
 #define WS_USE_TLS 1
+#endif
+// Cloud backend's video ingest port — where we RELAY Tello's video (received
+// on the Tello's own fixed port 11111) TO. Same host as WS_HOST by default.
+#ifndef VIDEO_HOST
+#define VIDEO_HOST WS_HOST
+#endif
+#ifndef VIDEO_PORT
+#define VIDEO_PORT 8890
 #endif
 #ifndef DEVICE_ID
 #define DEVICE_ID "tello-esp32-01"
@@ -144,6 +156,7 @@ static const unsigned long KEEPALIVE_MS = 5000UL; // LIMITS.keepaliveMs
 // ----------------------------------------------------------------------------
 static const uint16_t TELLO_PORT      = 8889;  // Tello SDK command/response port
 static const uint16_t UDP_LOCAL_PORT  = 8889;  // local bind for replies
+static const uint16_t TELLO_VIDEO_PORT = 11111; // fixed by the Tello SDK (video dest)
 static const IPAddress TELLO_BROADCAST(255, 255, 255, 255); // limited broadcast (phone LAN)
 static const unsigned long REPLY_TIMEOUT_MS   = 2000UL; // await a Tello reply
 static const unsigned long DISCOVERY_EVERY_MS = 800UL;  // sweep cadence (probes 3 hosts/call)
@@ -160,6 +173,8 @@ static const unsigned long DEBOUNCE_MS = 40; // stable-state debounce window
 // ----------------------------------------------------------------------------
 static WebSocketsClient webSocket;
 static WiFiUDP udp;
+static WiFiUDP videoUdpIn;  // receives Tello's raw video stream on TELLO_VIDEO_PORT
+static WiFiUDP videoUdpOut; // relays it verbatim to VIDEO_HOST:VIDEO_PORT (unbound client)
 
 // Runtime configuration (NVS-backed; falls back to the compiled config.h values).
 // Only the STA (phone hotspot) creds and the device token are user-editable via
@@ -216,11 +231,13 @@ static void sendTelemetryBattery(int battery);
 static void sendEvent(const char *event, const String &detail);
 static void sendPong();
 static void handleCommandFrame(JsonDocument &doc);
+static void handleRcFrame(JsonDocument &doc);
 static bool telloReplyOk(const String &reply);
 
 static void telloSendTo(const IPAddress &ip, const char *cmd);
 static String telloSendAwait(const char *cmd, bool *gotReply);
 static bool telloRecv(String &out, unsigned long timeoutMs);
+static void relayVideoPackets();
 
 static void discoverTello();
 static void markTelloLost();
@@ -250,6 +267,7 @@ void setup() {
 
   // Bind local UDP so Tello replies land back on us; we send to TELLO_PORT.
   udp.begin(UDP_LOCAL_PORT);
+  videoUdpIn.begin(TELLO_VIDEO_PORT); // bind so we can drain Tello's video relay in loop()
 
 #if HAS_BACKEND
   // Outbound WebSocket to the backend. beginSSL() uses WiFiClientSecure; with no
@@ -278,6 +296,7 @@ void loop() {
   httpServer.handleClient(); // serve the config form
 #endif
   pollEmergencyButton(); // safety first — must run every iteration
+  relayVideoPackets(); // drain Tello's video UDP -> backend, bounded per iteration (see below)
   if (!telloKnown) discoverTello(); // unicast sweep (internally rate-limited)
   keepaliveTick();       // dodge the 15 s auto-land
   ledTick();             // expire the flash overlay back to the idle color
@@ -400,6 +419,8 @@ static void wsEvent(WStype_t type, uint8_t *payload, size_t length) {
         handleCommandFrame(doc);
       } else if (strcmp(t, "ping") == 0) {
         sendPong();
+      } else if (strcmp(t, "rc") == 0) {
+        handleRcFrame(doc);
       }
       break;
     }
@@ -515,6 +536,20 @@ static bool telloReplyOk(const String &reply) {
     if (!isDigit(v[i])) return false;
   }
   return true; // all digits
+}
+
+// { type:'rc', a, b, c, d }  (ServerToDevice) — continuous joystick control for
+// tracking mode. Fire-and-forget: Tello never replies "ok" to `rc`, so this
+// bypasses telloSendAwait/sendResult entirely — no id, no reply, no result frame.
+static void handleRcFrame(JsonDocument &doc) {
+  if (!telloKnown) return; // nowhere to send it yet
+  int a = doc["a"] | 0;
+  int b = doc["b"] | 0;
+  int c = doc["c"] | 0;
+  int d = doc["d"] | 0;
+  char cmd[32];
+  snprintf(cmd, sizeof(cmd), "rc %d %d %d %d", a, b, c, d);
+  telloSendTo(telloIp, cmd);
 }
 
 // ============================================================================
@@ -666,6 +701,28 @@ static void markTelloLost() {
   lastDiscoveryMs = 0; // allow immediate re-discovery
   if (wsAuthed) sendEvent("tello_lost", String());
   ledApplyIdle(); // drone gone -> back to blue
+}
+
+// ============================================================================
+// Video relay — verbatim UDP forward of Tello's H.264 stream (port 11111) to
+// the backend's video ingest port. Non-blocking; the per-loop() packet count
+// is HARD-CAPPED so a video burst can never starve command relay, keepalive,
+// or the emergency button poll.
+// ============================================================================
+static void relayVideoPackets() {
+  if (!telloKnown) return; // video only flows once streamon has been sent, which
+                            // itself only follows discovery — defensive guard.
+  static uint8_t buf[1472]; // standard max UDP payload under Ethernet MTU
+  const int MAX_PACKETS_PER_LOOP = 16; // safety cap — never starve the rest of loop()
+  for (int i = 0; i < MAX_PACKETS_PER_LOOP; i++) {
+    int sz = videoUdpIn.parsePacket();
+    if (sz <= 0) break; // nothing waiting — drain complete for this iteration
+    int n = videoUdpIn.read(buf, sizeof(buf));
+    if (n <= 0) continue; // spurious/empty read — skip, don't relay garbage
+    videoUdpOut.beginPacket(VIDEO_HOST, VIDEO_PORT);
+    videoUdpOut.write(buf, n);
+    videoUdpOut.endPacket();
+  }
 }
 
 // ============================================================================
