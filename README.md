@@ -77,7 +77,7 @@ it automatically via `#if __has_include("config.h")`.
 | `WS_PORT` | `443` for `wss`, or `8080` (or your dev port) for plain `ws`. |
 | `WS_PATH` | Fixed: `/ws/device` (the backend's device endpoint). |
 | `WS_USE_TLS` | `1` = `wss` (`beginSSL`), `0` = plain `ws` (`begin`) for local dev. |
-| `VIDEO_HOST` | Where the raw Tello video relay (UDP) is sent. Defaults to `WS_HOST` — same backend. |
+| `VIDEO_HOST` | Where the raw Tello video relay (UDP) is sent. Defaults to `WS_HOST`, but **if `WS_HOST` is a Cloudflare-proxied ("orange cloud") domain, override this explicitly with the origin server's real IP** — standard Cloudflare does not relay arbitrary UDP, so video would silently never arrive regardless of firewall/port-forwarding config on the origin. |
 | `VIDEO_PORT` | Backend's video-ingest UDP port. Must match its `VIDEO_PORT` env var. Default `8890`. |
 | `DEVICE_ID` | Identifier sent in the `hello` frame. |
 | `DEVICE_TOKEN` | Shared secret; **must equal the backend's `DEVICE_TOKEN`** env var. |

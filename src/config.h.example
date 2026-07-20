@@ -43,8 +43,14 @@
 
 // ---- Video relay (backend ingest for ArUco tracking) -----------------------
 // Where the ESP32 relays Tello's raw UDP video stream (received on Tello's own
-// fixed port 11111) TO. Same host as WS_HOST — it's the same backend.
-#define VIDEO_HOST  "drone.xenv.cc"   // host only, no scheme/path
+// fixed port 11111) TO. If WS_HOST above is a Cloudflare-proxied ("orange
+// cloud") domain -- as is typical when it's fronted for HTTPS/wss -- do NOT
+// reuse it here: standard Cloudflare does not relay arbitrary UDP, so the
+// video would silently never reach the backend regardless of any firewall/
+// port-forwarding setup on the origin. Point VIDEO_HOST at the origin
+// server's real IP directly, or a DNS-only (grey-cloud, unproxied) subdomain
+// if you'd rather not hardcode an IP that might change.
+#define VIDEO_HOST  "203.0.113.10"    // origin server IP, NOT the proxied WS_HOST domain
 #define VIDEO_PORT  8890               // matches backend config.videoPort default
 
 // ---- Device identity (sent in the hello frame) -----------------------------
